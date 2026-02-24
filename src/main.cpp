@@ -1,4 +1,4 @@
-/*
+﻿/*
 A program that performs huffman encoding on input.
 Command line arguments
 
@@ -9,6 +9,7 @@ Command line arguments
 
 #include <bits/stdc++.h>
 #include "huffman.cpp"
+#include "shannon.cpp"
 
 using namespace std;
 
@@ -38,7 +39,7 @@ int main(int argc, char* argv[]) {
     }
 
     if (argc < 3) {
-        cout << "Usage: " << argv[0] << " [options] input output" << endl;
+        printf("Usage: %s [options] input output\n", argv[0]);
         return 1;
     }
 
@@ -49,14 +50,14 @@ int main(int argc, char* argv[]) {
         // Decompress
         ifstream in(input_file, ios::binary); // open file in binary mode
         if (!in) {
-            cout << "Cannot open input file" << endl;
+            printf("Cannot open input file\n");
             return 1;
         }
 
         uint32_t sig;
         in.read((char*)&sig, 4);
         if (sig != 0x1518C234) {
-            cout << "Invalid file signature" << endl;
+            printf("Invalid file signature\n");
             return 1;
         }
 
@@ -105,7 +106,7 @@ int main(int argc, char* argv[]) {
 
         uint32_t computed_crc = crc32(decoded);
         if (computed_crc != crc_stored) {
-            cout << "CRC mismatch" << endl;
+            printf("CRC mismatch\n");
             return 1;
         }
 
@@ -113,14 +114,14 @@ int main(int argc, char* argv[]) {
         out.write(decoded.c_str(), decoded.size());
 
         if (verbose) {
-            cout << "Decompressed successfully" << endl;
+            printf("Decompressed successfully\n");
         }
     }
     else {
         // Compress
         ifstream in(input_file, ios::binary);
         if (!in) {
-            cout << "Cannot open input file" << endl;
+            printf("Cannot open input file\n");
             return 1;
         }
 
@@ -183,7 +184,7 @@ int main(int argc, char* argv[]) {
 
         ofstream out(output_file, ios::binary);
         if (!out) {
-            cout << "Cannot open output file" << endl;
+            printf("Cannot open output file\n");
             return 1;
         }
 
@@ -209,31 +210,107 @@ int main(int argc, char* argv[]) {
         }
 
         if (verbose) {
-            // Calculate entropy
-            double entropy = 0;
-            for (int i = 0; i < 288; i++) {
-                if (freq[i] > 0) {
-                    double prob = (double)freq[i] / text.size();
-                    entropy -= prob * log2(prob);
+            // -------------------------------------------------------
+            // Raw byte frequencies for theoretical comparisons.
+            // Shannon / Shannon-Fano / Huffman are all applied to the
+            // raw source bytes so the three schemes are compared fairly.
+            // -------------------------------------------------------
+            vector<int> byte_freq(256, 0);
+            for (unsigned char c : text) byte_freq[c]++;
+
+            // --- Source entropy (bits per source symbol) ---
+            double entropy = 0.0;
+            for (int i = 0; i < 256; i++) {
+                if (byte_freq[i] > 0) {
+                    double p = (double)byte_freq[i] / text.size();
+                    entropy -= p * log2(p);
                 }
             }
 
-            // Average code length
-            double avg_len = 0;
-            for (int i = 0; i < 288; i++) {
-                if (freq[i] > 0) {
-                    double prob = (double)freq[i] / text.size();
-                    avg_len += prob * codes[i].size();
+            // --- Huffman on source bytes ---
+            Node* huff_root = generate_tree(byte_freq);
+            map<int, string> huff_codes;
+            build_codes(huff_root, huff_codes);
+            double huff_avg = 0.0;
+            for (int i = 0; i < 256; i++) {
+                if (byte_freq[i] > 0) {
+                    double p = (double)byte_freq[i] / text.size();
+                    huff_avg += p * huff_codes[i].size();
+                }
+            }
+            double huff_eff = (huff_avg > 0.0) ? entropy / huff_avg : 0.0;
+
+            // --- Shannon coding on source bytes ---
+            ShannonResult sr = shannon_coding(byte_freq);
+
+            // --- Shannon-Fano coding on source bytes ---
+            ShannonResult sfr = shannon_fano_coding(byte_freq);
+
+            // --- N-ary Huffman examples (ternary + quaternary) ---
+            map<int, string> huff3_codes, huff4_codes;
+            NaryNode* huff3_root = generate_tree_nary(byte_freq, 3);
+            NaryNode* huff4_root = generate_tree_nary(byte_freq, 4);
+            build_codes_nary(huff3_root, huff3_codes);
+            build_codes_nary(huff4_root, huff4_codes);
+            double huff3_avg = avg_code_length(byte_freq, huff3_codes);
+            double huff4_avg = avg_code_length(byte_freq, huff4_codes);
+            // Efficiency: for base-n Huffman, optimal avg length is H / log2(n)
+            double huff3_eff = (huff3_avg > 0.0) ? (entropy / log2(3)) / huff3_avg : 0.0;
+            double huff4_eff = (huff4_avg > 0.0) ? (entropy / log2(4)) / huff4_avg : 0.0;
+            free_tree_nary(huff3_root);
+            free_tree_nary(huff4_root);
+
+            // --- Actual compressed stats (whatever mode was used) ---
+            double actual_avg = 0.0;
+            long long token_total = 0;
+            for (int i = 0; i < 288; i++) token_total += freq[i];
+            if (token_total > 0) {
+                for (int i = 0; i < 288; i++) {
+                    if (freq[i] > 0)
+                        actual_avg += (double)freq[i] / token_total * codes[i].size();
                 }
             }
 
-            // Shannon length
-            double shannon_len = entropy;
+            // -------------------------------------------------------
+            // Pretty-print using printf to avoid MinGW cout-flush bugs
+            // -------------------------------------------------------
+#define SEP "----------------------------------------------------\n"
 
-            cout << "Entropy: " << entropy << endl;
-            cout << "Average code length: " << avg_len << endl;
-            cout << "Shannon length: " << shannon_len << endl;
-            cout << "Compression ratio: " << (double)comp_size / text.size() << endl;
+            printf(SEP);
+            printf("  Source statistics\n");
+            printf(SEP);
+            printf("  Symbols (unique / total)  : %zu / %zu\n",
+                huff_codes.size(), text.size());
+            printf("  Shannon entropy           : %.4f bits/symbol\n", entropy);
+            printf(SEP);
+            printf("  Coding scheme comparison (source bytes)\n");
+            printf(SEP);
+            printf("  %-20s  %8s  %10s\n", "Scheme", "Avg len", "Efficiency");
+            printf(SEP);
+            printf("  %-20s  %8.4f  %9.4f%%\n",
+                "Shannon", sr.avg_code_length, sr.efficiency * 100);
+            printf("  %-20s  %8.4f  %9.4f%%\n",
+                "Shannon-Fano", sfr.avg_code_length, sfr.efficiency * 100);
+            printf("  %-20s  %8.4f  %9.4f%%\n",
+                "Huffman (binary)", huff_avg, huff_eff * 100);
+            printf("  %-20s  %8.4f  %9.4f%%  (base-3 symbols)\n",
+                "Huffman (ternary)", huff3_avg, huff3_eff * 100);
+            printf("  %-20s  %8.4f  %9.4f%%  (base-4 symbols)\n",
+                "Huffman (quaternary)", huff4_avg, huff4_eff * 100);
+            printf(SEP);
+            printf("  Actual compression\n");
+            printf(SEP);
+            printf("  Mode                      : %s\n",
+                huffman_only ? "Huffman-only" : "LZ77 + Huffman");
+            printf("  Avg token code length     : %.4f bits\n", actual_avg);
+            printf("  Compressed size           : %u bytes\n", comp_size);
+            printf("  Uncompressed size         : %zu bytes\n", text.size());
+            printf("  Compression ratio         : %.4f\n",
+                (double)comp_size / text.size());
+            printf(SEP);
+            fflush(stdout);
+
+#undef SEP
         }
     }
 
